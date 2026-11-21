@@ -54,9 +54,28 @@ async function fetchPage(url) {
   throw new Error("Geizhals kept answering 429/5xx");
 }
 
+// --probe: read one well-known product page and record whether it worked in data/probe.json,
+// so it's visible from the repo whether Geizhals answers GitHub's servers.
+async function probe() {
+  const url = "https://geizhals.at/apple-airpods-pro-3-generation-mfhp4zm-a-a3587143.html";
+  const out = { ran: new Date().toISOString(), url };
+  try {
+    const p = parsePage(await fetchPage(url));
+    Object.assign(out, p ? { ok: true, price: p.price, offers: p.offers, how: p.how, name: p.name } : { ok: false, error: "page loaded, but no price found" });
+  } catch (e) { Object.assign(out, { ok: false, error: String(e.message || e) }); }
+  await writeFile(new URL("../data/probe.json", import.meta.url), JSON.stringify(out, null, 1) + "\n");
+  console.log("probe:", JSON.stringify(out));
+}
+
 async function main() {
+  if (process.argv.includes("--probe")) return probe();
   const ids = process.argv.slice(2).filter((a) => /^a\d+$/.test(a));
-  const list = ids.length ? ids.map((id) => ({ id, url: `https://geizhals.at/${id}.html` })) : await watched();
+  let list;
+  if (ids.length) list = ids.map((id) => ({ id, url: `https://geizhals.at/${id}.html` }));
+  else {
+    try { list = await watched(); }
+    catch (e) { console.warn(`Couldn't read the watch list (are the Firestore rules published?): ${e.message}`); return; }
+  }
   await mkdir(DIR, { recursive: true });
   const status = { ran: new Date().toISOString(), checked: 0, updated: 0, failed: [] };
 
