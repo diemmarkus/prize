@@ -109,7 +109,8 @@ function analyze(item) {
 /* ---------- chart ---------- */
 function chart(item, a) {
   const ps = hist(item);
-  if (ps.length < 2) return "";
+  if (!ps.length) return "";
+  if (ps.length === 1) return chartOne(item, ps[0]);
   const W = Math.round(Math.max(280, $("main").clientWidth)), H = 190, T = 20, B = 22, P = 18;
   const xs = ps.map((p) => parseD(p.d).getTime());
   const x0 = xs[0], x1 = xs[xs.length - 1] === x0 ? x0 + DAY : xs[xs.length - 1];
@@ -137,6 +138,22 @@ function chart(item, a) {
   g += `<text x="${P}" y="${H - 5}">${esc(relDate(ps[0].d))}</text><text x="${W - P}" y="${H - 5}" text-anchor="end">${esc(relDate(ps[ps.length - 1].d))}</text>`;
   g += `<rect class="scrub" x="0" y="0" width="${W}" height="${H}" fill="transparent"/>`;
   return `<div class="chart" data-chart="${item.id}"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Price over time">${g}</svg><div class="readout hint" id="ro-${item.id}">&nbsp;</div></div>`;
+}
+
+// One price so far: a flat line up to today's dot, the target if set, and a hint.
+function chartOne(item, p) {
+  const W = Math.round(Math.max(280, $("main").clientWidth)), H = 130, P = 18;
+  const vals = [p.p].concat(item.target ? [+item.target] : []);
+  let y0 = Math.min(...vals), y1 = Math.max(...vals);
+  const pad = (y1 - y0) * 0.35 || y1 * 0.1 || 1; y0 -= pad; y1 += pad;
+  const Y = (v) => 18 + (1 - (v - y0) / (y1 - y0)) * (H - 40);
+  const y = Y(p.p);
+  let g = `<line x1="0" x2="${W - 8}" y1="${y}" y2="${y}" stroke="var(--ink-3)" stroke-dasharray="2 5"/>`;
+  if (item.target) { const ty = Y(+item.target); g += `<line x1="0" x2="${W}" y1="${ty}" y2="${ty}" stroke="var(--ink-3)" stroke-dasharray="4 4"/><text x="${P}" y="${ty - 6}">target ${esc(fmt(+item.target))}</text>`; }
+  g += `<circle cx="${W - 8}" cy="${y}" r="5" fill="var(--accent)" stroke="var(--bg-2)" stroke-width="2"/>`;
+  g += `<text x="${W - P - 4}" y="${y - 10}" text-anchor="end">${esc(fmt(p.p))}</text>`;
+  g += `<text x="${P}" y="${H - 6}">First price · ${esc(relDate(p.d))}</text><text x="${W - P}" y="${H - 6}" text-anchor="end">log again on another day →</text>`;
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="First price">${g}</svg></div>`;
 }
 
 /* ---------- views ---------- */
