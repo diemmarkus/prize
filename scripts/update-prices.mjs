@@ -1,118 +1,139 @@
-// Fetches today's lowest Geizhals price for every watched product and appends it to
-// data/prices/<id>.json. Run by .github/workflows/update-prices.yml every hour; each product is
-// fetched at most once per (Vienna) day, so new products get a first price within the hour.
+// Daily prices for everything in data/watch.json, written to data/prices/<id>.json.
+// Run by .github/workflows/update-prices.yml. Keys stay in GitHub Secrets, never in the browser.
 //
-//   node scripts/update-prices.mjs            (reads the watch list from Firestore)
-//   node scripts/update-prices.mjs a3587143   (just these ids, handy for trying the parser)
+//   KEEPA_API_KEY=… TRAVELPAYOUTS_TOKEN=… node scripts/update-prices.mjs
+//   node scripts/update-prices.mjs --only k-maerklin-29890
 //
-// The watch list is the public `watched` collection (ids and links only, nobody's account).
-// Geizhals' robots.txt allows product pages; price-history pages (?phist=) are disallowed for
-// bots, so we never request them and build the history ourselves, one price a day.
+// Sources (official APIs only):
+//  - keepa:          Amazon price history (Keepa API). The first run brings the full past year.
+//  - travelpayouts:  cheapest round trip for given dates found by Aviasales users in the last 48 h
+//                    (Aviasales Data API). One price per day; the history builds up from today.
+// Geizhals is not used: it answers GitHub's servers with HTTP 403, and we don't work around that.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { parsePage, canonicalUrl } from "./geizhals.mjs";
 
-const PROJECT = "stonks-6ec1f";
-const API_KEY = "AIzaSyAE-QjP0JxtyXLTkJsYwFyqGCMimFNjgFA"; // public web key, see js/firebase-config.js
 const DIR = new URL("../data/prices/", import.meta.url);
+const WATCH = new URL("../data/watch.json", import.meta.url);
 const STATUS = new URL("../data/status.json", import.meta.url);
-const UA = "prize-bot/1.0 (+https://github.com/diemmarkus/prize; personal price tracker, one request per product per day)";
-const STALE_DAYS = 30; // stop fetching products nobody has opened in the app for this long
-
+const dayOf = (d) => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Vienna" }).format(d);
+const today = dayOf(new Date());
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Vienna" }).format(new Date()); // YYYY-MM-DD
-const daysAgo = (d) => (Date.parse(today) - Date.parse(d)) / 864e5;
+const round2 = (n) => Math.round(n * 100) / 100;
 
-async function watched() {
-  const out = [];
-  let token = "";
-  do {
-    const url = `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents/watched?pageSize=300&key=${API_KEY}${token ? `&pageToken=${token}` : ""}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Firestore: HTTP ${res.status} ${await res.text()}`);
-    const j = await res.json();
-    for (const d of j.documents || []) {
-      const f = d.fields || {};
-      out.push({ id: d.name.split("/").pop(), url: f.url?.stringValue, name: f.name?.stringValue, lastSeen: f.lastSeen?.stringValue });
+async function readJson(url, fallback) { try { return JSON.parse(await readFile(url, "utf8")); } catch { return fallback; } }
+
+async function getJson(url, label) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const text = await res.text();
+    let body; try { body = JSON.parse(text); } catch { body = null; }
+    if (res.status === 429) { // Keepa: not enough tokens yet
+      const wait = Math.min(15 * 60e3, (body?.refillIn ?? 60e3) + 2e3);
+      console.log(`${label}: waiting ${Math.round(wait / 1000)} s for tokens`);
+      await sleep(wait); continue;
     }
-    token = j.nextPageToken || "";
-  } while (token);
-  return out;
-}
-
-async function load(id) {
-  try { return JSON.parse(await readFile(new URL(`${id}.json`, DIR), "utf8")); } catch { return null; }
-}
-
-async function fetchPage(url) {
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const res = await fetch(url, { headers: { "User-Agent": UA, "Accept": "text/html", "Accept-Language": "de-AT,de;q=0.9,en;q=0.5" }, redirect: "follow" });
-    if (res.status === 429 || res.status >= 500) { await sleep(15000 * attempt); continue; }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.text();
+    if (!res.ok) throw new Error(`${label}: HTTP ${res.status} ${text.slice(0, 200)}`);
+    return body;
   }
-  throw new Error("Geizhals kept answering 429/5xx");
+  throw new Error(`${label}: still rate limited`);
 }
 
-// --probe: read one well-known product page and record whether it worked in data/probe.json,
-// so it's visible from the repo whether Geizhals answers GitHub's servers.
-async function probe() {
-  const url = "https://geizhals.at/apple-airpods-pro-3-generation-mfhp4zm-a-a3587143.html";
-  const out = { ran: new Date().toISOString(), url };
-  try {
-    const p = parsePage(await fetchPage(url));
-    Object.assign(out, p ? { ok: true, price: p.price, offers: p.offers, how: p.how, name: p.name } : { ok: false, error: "page loaded, but no price found" });
-  } catch (e) { Object.assign(out, { ok: false, error: String(e.message || e) }); }
-  await writeFile(new URL("../data/probe.json", import.meta.url), JSON.stringify(out, null, 1) + "\n");
-  console.log("probe:", JSON.stringify(out));
+/* ---------- Keepa (Amazon) ---------- */
+// csv[0] = Amazon's own offer, csv[1] = new offers from other sellers; pairs of
+// [keepaMinutes, priceInCents], -1 = no offer. keepaMinutes count from 2011-01-01 UTC.
+const KEEPA_DOMAIN = { com: 1, "co.uk": 2, de: 3, fr: 4, it: 8, es: 9 };
+const keepaTime = (m) => new Date((m + 21564000) * 60000);
+
+// One price per day (the lower of Amazon and other new offers), kept only where it changed.
+export function keepaDaily(csv, days = 365, end = today) {
+  const series = [csv?.[0], csv?.[1]].filter(Array.isArray).map((a) => {
+    const pts = [];
+    for (let i = 0; i + 1 < a.length; i += 2) pts.push([dayOf(keepaTime(a[i])), a[i + 1]]);
+    return pts;
+  });
+  if (!series.length || !series.some((s) => s.length)) return [];
+  const first = series.flat().map((p) => p[0]).sort()[0];
+  const startMs = Math.max(Date.parse(first + "T12:00:00Z"), Date.parse(end + "T12:00:00Z") - days * 864e5);
+  const out = [];
+  for (let t = startMs; ; t += 864e5) {
+    const d = new Date(t).toISOString().slice(0, 10);
+    if (d > end) break;
+    const vals = series.map((pts) => { let v = -1; for (const [pd, pv] of pts) { if (pd <= d) v = pv; else break; } return v; }).filter((v) => v > 0);
+    if (vals.length) out.push({ d, p: round2(Math.min(...vals) / 100) });
+  }
+  return out.filter((h, i) => i === 0 || i === out.length - 1 || h.p !== out[i - 1].p);
 }
+
+async function keepa(w, file) {
+  const key = process.env.KEEPA_API_KEY;
+  if (!key) throw new Error("KEEPA_API_KEY is not set");
+  const domain = KEEPA_DOMAIN[w.domain || "de"];
+  let asin = w.asin || file.asin;
+  if (!asin) {
+    const s = await getJson(`https://api.keepa.com/search?key=${key}&domain=${domain}&type=product&term=${encodeURIComponent(w.search)}`, `${w.id} search`);
+    const hit = (s.products || []).find((p) => !w.match || (p.title || "").includes(w.match));
+    if (!hit) throw new Error(`no Amazon product matching "${w.match}"; candidates: ${(s.products || []).slice(0, 5).map((p) => `${p.asin} ${p.title}`).join(" | ")}`);
+    asin = hit.asin;
+    console.log(`${w.id}: found ${asin} ${hit.title}`);
+  }
+  const r = await getJson(`https://api.keepa.com/product?key=${key}&domain=${domain}&asin=${asin}&history=1&days=365`, `${w.id} product`);
+  const p = r.products?.[0];
+  if (!p) throw new Error(`Keepa returned no product for ${asin}`);
+  const history = keepaDaily(p.csv);
+  if (!history.length) throw new Error("no price in the last year (out of stock on Amazon?)");
+  const tld = Object.keys(KEEPA_DOMAIN).find((k) => KEEPA_DOMAIN[k] === domain);
+  return { asin, name: p.title || w.name, url: `https://www.amazon.${tld}/dp/${asin}`, source: "Amazon via Keepa", history };
+}
+
+/* ---------- Travelpayouts / Aviasales (flights) ---------- */
+async function travelpayouts(w, file) {
+  const token = process.env.TRAVELPAYOUTS_TOKEN;
+  if (!token) throw new Error("TRAVELPAYOUTS_TOKEN is not set");
+  const q = (dep, ret) => `https://api.travelpayouts.com/aviasales/v3/prices_for_dates?origin=${w.origin}&destination=${w.destination}&departure_at=${dep}&return_at=${ret}&currency=eur&sorting=price&direct=false&one_way=false&limit=30&page=1&token=${token}`;
+  let r = await getJson(q(w.depart, w.return), w.id);
+  let exact = true;
+  let offers = (r?.data || []).filter((o) => o.price > 0);
+  if (!offers.length) { // nobody searched exactly these dates lately: same months, dates within 3 days
+    exact = false;
+    r = await getJson(q(w.depart.slice(0, 7), w.return.slice(0, 7)), w.id);
+    const gap = (o) => Math.abs(Date.parse(o.departure_at) - Date.parse(w.depart)) + Math.abs(Date.parse(o.return_at) - Date.parse(w.return));
+    offers = (r?.data || []).filter((o) => o.price > 0 && gap(o) <= 6 * 864e5);
+  }
+  if (!offers.length) throw new Error("no cached prices for these dates in the last 48 h");
+  const o = offers.sort((a, b) => a.price - b.price)[0];
+  const stops = o.transfers ? `${o.transfers} stop${o.transfers > 1 ? "s" : ""}` : "direct";
+  const entry = { d: today, p: round2(o.price), shop: [o.airline, stops, exact ? null : `${o.departure_at.slice(5, 10)}→${o.return_at.slice(5, 10)}`].filter(Boolean).join(" · ") };
+  const history = (file.history || []).filter((h) => h.d !== today).concat(entry).sort((a, b) => a.d.localeCompare(b.d));
+  return { name: w.name, url: o.link ? `https://www.aviasales.com${o.link}` : file.url, source: "Aviasales (Travelpayouts)", history };
+}
+
+const SOURCES = { keepa, travelpayouts };
 
 async function main() {
-  if (process.argv.includes("--probe")) return probe();
-  const ids = process.argv.slice(2).filter((a) => /^a\d+$/.test(a));
-  let list;
-  if (ids.length) list = ids.map((id) => ({ id, url: `https://geizhals.at/${id}.html` }));
-  else {
-    try { list = await watched(); }
-    catch (e) { console.warn(`Couldn't read the watch list (are the Firestore rules published?): ${e.message}`); return; }
-  }
+  const only = process.argv.includes("--only") ? process.argv[process.argv.indexOf("--only") + 1] : null;
+  const watch = (await readJson(WATCH, [])).filter((w) => !only || w.id === only);
   await mkdir(DIR, { recursive: true });
-  const status = { ran: new Date().toISOString(), checked: 0, updated: 0, failed: [] };
-
-  for (const w of list) {
-    const file = (await load(w.id)) || { id: w.id, history: [] };
-    if (!ids.length) {
-      if (file.history.some((h) => h.d === today) || file.lastTry === today) continue; // done for today
-      if (w.lastSeen && daysAgo(w.lastSeen) > STALE_DAYS) continue;                    // removed or forgotten
-    }
-    const url = canonicalUrl(w.url) || `https://geizhals.at/${w.id}.html`;
-    status.checked++;
+  const status = { ran: new Date().toISOString(), updated: 0, failed: [] };
+  for (const w of watch) {
+    const url = new URL(`${w.id}.json`, DIR);
+    const file = await readJson(url, { id: w.id, history: [] });
     try {
-      const html = await fetchPage(url);
-      const p = parsePage(html);
-      if (!p) throw new Error("no price found on the page");
-      file.url = url;
-      file.name = p.name || file.name || w.name || null;
-      if (p.image) file.image = p.image;
-      file.currency = "EUR";
-      file.history = file.history.filter((h) => h.d !== today);
-      file.history.push({ d: today, p: Math.round(p.price * 100) / 100, ...(p.offers ? { n: p.offers } : {}) });
-      file.history.sort((a, b) => a.d.localeCompare(b.d));
-      file.checked = new Date().toISOString();
-      delete file.error; delete file.lastTry;
+      const fn = SOURCES[w.source];
+      if (!fn) throw new Error(`unknown source ${w.source}`);
+      Object.assign(file, await fn(w, file), { id: w.id, currency: "EUR", checked: new Date().toISOString() });
+      delete file.error;
       status.updated++;
-      console.log(`${w.id}: €${p.price} (${p.how}) ${file.name || ""}`);
+      const last = file.history[file.history.length - 1];
+      console.log(`${w.id}: €${last.p} (${file.history.length} price points)`);
     } catch (e) {
       file.error = String(e.message || e);
-      file.lastTry = today; // try again tomorrow, not every hour
       status.failed.push({ id: w.id, error: file.error });
-      console.warn(`${w.id}: ${file.error} (${url})`);
+      console.warn(`${w.id}: ${file.error}`);
     }
-    await writeFile(new URL(`${w.id}.json`, DIR), JSON.stringify(file, null, 1) + "\n");
-    await sleep(4000); // be gentle
+    await writeFile(url, JSON.stringify(file, null, 1) + "\n");
   }
-  if (!ids.length && status.checked) await writeFile(STATUS, JSON.stringify(status, null, 1) + "\n");
-  console.log(`checked ${status.checked}, updated ${status.updated}, failed ${status.failed.length}`);
+  await writeFile(STATUS, JSON.stringify(status, null, 1) + "\n");
+  console.log(`updated ${status.updated}, failed ${status.failed.length}`);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+if (import.meta.url === `file://${process.argv[1]}`) main().catch((e) => { console.error(e); process.exit(1); });

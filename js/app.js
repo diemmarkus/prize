@@ -40,13 +40,15 @@ function relDate(iso) {
 const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return "shop"; } };
 const timeOf = (iso) => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 function blackFriday(y) { const d = new Date(y, 10, 1); return new Date(y, 10, 1 + ((4 - d.getDay() + 7) % 7) + 22); }
-const nameOf = (i) => i.name || ui.prices[i.id]?.name || `Geizhals ${i.id}`;
+const autoId = (i) => i.auto || (/^a\d+$/.test(i.id) ? i.id : null); // where daily prices come from, if anywhere
+const autoOf = (i) => (autoId(i) ? ui.prices[autoId(i)] : null);
+const nameOf = (i) => i.name || autoOf(i)?.name || `Geizhals ${i.id}`;
 const isTrip = (i) => i.kind === "trip";
 const shortDate = (iso) => parseD(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: parseD(iso).getFullYear() === parseD(today()).getFullYear() ? undefined : "numeric" });
 // Prices over time: the daily job's (if any) plus the ones you logged; one per day, yours win.
 function hist(i) {
   const m = new Map();
-  for (const h of ui.prices[i.id]?.history || []) m.set(h.d, h);
+  for (const h of autoOf(i)?.history || []) m.set(h.d, h);
   for (const l of i.log || []) m.set(l.d, { ...l, own: true });
   return [...m.values()].sort((a, b) => a.d.localeCompare(b.d));
 }
@@ -195,7 +197,7 @@ function appHTML() {
 }
 const fab = () => `<button class="fab" data-act="add" aria-label="Add a product">${ico("plus")}</button>`;
 function rowHTML(i, a) {
-  const open = ui.open === i.id, err = ui.prices[i.id]?.error;
+  const open = ui.open === i.id;
   const tag = isTrip(i) ? `<span class="row__tag">${i.date ? esc(shortDate(i.date)) : "Trip"}</span>` : "";
   const sub = tag + (a.n ? `${esc(relDate(a.last.d))}${a.last.shop ? ` · ${esc(a.last.shop)}` : a.last.n ? ` · ${a.last.n} offers` : ""}` : "No price yet");
   return `<li class="${open ? "is-open" : ""}" data-li="${i.id}"><div class="rw"><div class="swipe-bg">Remove</div>
@@ -206,7 +208,7 @@ function rowHTML(i, a) {
     </div></div>${open ? openHTML(i, a) : ""}</li>`;
 }
 function openHTML(i, a) {
-  const ps = hist(i).slice().reverse(), err = ui.prices[i.id]?.error;
+  const ps = hist(i).slice().reverse(), auto = autoOf(i);
   let h = `<div class="open ${ui.anim === i.id ? "anim" : ""}">`;
   ui.anim = null;
   if (a.n) {
@@ -216,9 +218,11 @@ function openHTML(i, a) {
   h += `<div class="verdict"><div class="verdict__txt"><h3 class="${a.cls}">${esc(a.title)}</h3>${a.sub ? `<p>${esc(a.sub)}</p>` : ""}</div>
     ${a.reasons.length > 1 ? `<button class="info-btn" data-act="info" aria-expanded="${ui.info}" aria-label="Why">i</button>` : ""}</div>`;
   if (ui.info && a.reasons.length > 1) h += `<div class="note"><ul>${a.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></div>`;
+  if (autoId(i)) h += `<p class="hint">${auto?.history?.length ? `Daily prices: ${esc(auto.source || "price job")}${auto.checked ? ` · checked ${esc(relDate(new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Vienna" }).format(new Date(auto.checked))))}` : ""}` : "Daily prices: waiting for the first run of the price job"}${auto?.error ? ` · <span class="warn">last run: ${esc(auto.error)}</span>` : ""}</p>`;
   h += chart(i, a);
   if (a.n > 1) h += `<div class="stats"><div class="stat"><small>Lowest</small><b>${esc(fmt(a.min))}</b></div><div class="stat"><small>Average</small><b>${esc(fmt(a.avg))}</b></div><div class="stat"><small>${i.target ? "Target" : "Highest"}</small><b>${esc(fmt(i.target ? +i.target : a.max))}</b></div></div>`;
-  const buy = i.url ? { href: i.url, label: articleId(i.url) ? "Buy on Geizhals" : `Buy at ${host(i.url)}` }
+  const link = i.url || auto?.url;
+  const buy = link ? { href: link, label: articleId(link) ? "Buy on Geizhals" : `${isTrip(i) ? "Book" : "Buy"} at ${host(link)}` }
     : !isTrip(i) ? { href: `https://geizhals.at/?fs=${encodeURIComponent(nameOf(i))}`, label: "Find on Geizhals" } : null;
   h += `<div class="actions">${buy ? `<a class="btn btn--primary btn--grow" href="${esc(buy.href)}" target="_blank" rel="noopener">${ico("ext")}${esc(buy.label)}</a>` : ""}
     <button class="btn" data-act="edit-item">${ico("edit")}Edit</button></div>`;
@@ -266,7 +270,7 @@ function restoreInputs(k) {
 
 /* ---------- data ---------- */
 async function loadPrices(items) {
-  await Promise.all(items.filter((i) => /^a\d+$/.test(i.id) && !(i.id in ui.prices)).map(async (i) => { ui.prices[i.id] = (await ui.store.prices(i.id)) || null; }));
+  await Promise.all(items.filter((i) => autoId(i) && !(autoId(i) in ui.prices)).map(async (i) => { ui.prices[autoId(i)] = (await ui.store.prices(autoId(i))) || null; }));
   render();
 }
 async function useStore(store) {
@@ -372,7 +376,7 @@ document.addEventListener("submit", async (e) => {
   try { history.replaceState(null, "", "#p-" + item.id); } catch {}
   ui.items = ui.items.filter((i) => i.id !== item.id).concat(item);
   render();
-  try { await ui.store.save(item); if (gid) loadPrices([item]); }
+  try { await ui.store.save(item); if (autoId(item)) loadPrices([item]); }
   catch (err) { console.warn(err); toast("Couldn't save. Check your connection and try again."); }
 });
 

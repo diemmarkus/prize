@@ -8,6 +8,8 @@ export function localStore() {
   let items = [], cb = () => {};
   try { const saved = localStorage.getItem(LIST_KEY); items = saved ? JSON.parse(saved) : samples(); } catch { items = samples(); }
   // replace the old made-up samples, keep the user's own items
+  // samples now get daily prices from data/watch.json
+  for (const x of samples()) { const i = items.find((y) => y.id === x.id && y.sample === 2); if (i && x.auto && !i.auto) i.auto = x.auto; }
   const crete = items.find((i) => i.id === "s-crete" && i.sample === 2 && !(i.log || []).length);
   if (crete) Object.assign(crete, samples().find((x) => x.id === "s-crete"));
   if (items.some((i) => i.sample === true)) {
@@ -44,9 +46,9 @@ export async function fetchStatus() {
 // starts there). Marked sample: true, version 2 (older made-up samples are replaced on load).
 export function samples() {
   return [
-    { id: "s-maerklin", kind: "product", sample: 2, name: "Märklin 29890 Digital-Startpackung Güterzug mit BR 89.0", url: "", target: 210, addedAt: "2026-11-21",
+    { id: "s-maerklin", kind: "product", sample: 2, auto: "k-maerklin-29890", name: "Märklin 29890 Digital-Startpackung Güterzug mit BR 89.0", url: "", target: 210, addedAt: "2026-11-21",
       log: [{ d: "2026-11-21", p: 226.72, shop: "Geizhals.de lowest" }] },
-    { id: "s-vegas", kind: "trip", sample: 2, name: "Flight Vienna → Las Vegas, 15–29 Jan", date: "2027-01-15", url: "", target: 600, addedAt: "2026-11-21",
+    { id: "s-vegas", kind: "trip", sample: 2, auto: "tp-VIE-LAS-2027-01-15", name: "Flight Vienna → Las Vegas, 15–29 Jan", date: "2027-01-15", url: "", target: 600, addedAt: "2026-11-21",
       log: [{ d: "2026-11-21", p: 651, shop: "SAS, 1+ stops" }] },
     // billiger-mietwagen.de price barometer: June 2027 at €56.20 (median of the lowest search prices,
     // read as per day) × 7 days.

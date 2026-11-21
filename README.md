@@ -12,14 +12,21 @@ Products and trips (with a travel date), any shop or booking link, and prices yo
 On the first visit three samples with made-up prices are added (Märklin starter set, a flight
 to Las Vegas in January, a rental car on Crete in June); "Remove samples" takes them out.
 
-## Automatic Geizhals prices (paused)
+## Automatic prices
 
-`scripts/update-prices.mjs` and `.github/workflows/update-prices.yml` can save the lowest Geizhals
-price of a product once a day into `data/prices/<id>.json`, which the app already shows. The
-schedule is paused: Geizhals answers GitHub's servers with HTTP 403 (see `data/probe.json`), and
-we don't work around a block. The job only requests product pages, never the price-history pages
-(`?phist=`) that Geizhals' robots.txt disallows for bots.
+`data/watch.json` lists what the daily job (`.github/workflows/update-prices.yml`, 05:23 Vienna)
+fetches into `data/prices/<id>.json`. An item in the app points at one with its `auto` field and
+shows that history merged with the prices you log.
+
+| Source | Secret | What you get |
+|---|---|---|
+| `keepa` | `KEEPA_API_KEY` | Amazon price history (the past year on the first run), lower of Amazon and other new offers per day |
+| `travelpayouts` | `TRAVELPAYOUTS_TOKEN` | Cheapest round trip for the dates, found by Aviasales users in the last 48 h; one price a day |
+
+Geizhals is not used: it answers GitHub's servers with HTTP 403, and its robots.txt disallows the
+price-history pages for bots. `scripts/geizhals.mjs` is still used by the app to recognise links.
 
 ```sh
 node tests/parse.test.mjs
+KEEPA_API_KEY=… node scripts/update-prices.mjs --only k-maerklin-29890
 ```

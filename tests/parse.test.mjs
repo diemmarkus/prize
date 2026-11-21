@@ -27,3 +27,12 @@ assert.equal(parsePage(`<span class="price gh_price"><span>&euro; 99,90</span></
 
 assert.equal(parsePage("<html>Bitte bestätigen Sie, dass Sie kein Roboter sind</html>"), null);
 console.log("parse tests passed");
+
+// Keepa: minutes since 2011-01-01 UTC, cents, -1 = no offer; lower of Amazon and other new offers per day
+const { keepaDaily } = await import("../scripts/update-prices.mjs");
+const km = (iso) => Date.parse(iso + "T08:00:00Z") / 60000 - 21564000;
+const csv = [[km("2026-11-01"), 24999, km("2026-11-10"), -1, km("2026-11-15"), 22999], [km("2026-11-05"), 23999]];
+assert.deepEqual(keepaDaily(csv, 365, "2026-11-20"), [
+  { d: "2026-11-01", p: 249.99 }, { d: "2026-11-05", p: 239.99 }, { d: "2026-11-15", p: 229.99 }, { d: "2026-11-20", p: 229.99 },
+]);
+console.log("keepa tests passed");
