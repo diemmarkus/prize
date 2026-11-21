@@ -1,0 +1,49 @@
+name: Update prices
+
+on:
+  schedule:
+    # Every hour. Each product is fetched at most once a day, so this mostly does nothing,
+    # except giving a newly added product its first price within the hour. Times are UTC.
+    - cron: "17 * * * *"
+  workflow_dispatch: # run by hand from the Actions tab
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - ".github/workflows/update-prices.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-prices
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Parser test
+        run: node tests/parse.test.mjs
+
+      - name: Geizhals prices
+        run: node scripts/update-prices.mjs
+
+      - name: Commit if changed
+        run: |
+          git config user.name "prize-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Update prices"
+            git pull --rebase --quiet -X theirs
+            git push
+          fi
