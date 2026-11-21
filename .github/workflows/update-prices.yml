@@ -1,17 +1,9 @@
 name: Update prices
 
 on:
-  schedule:
-    # Every hour. Each product is fetched at most once a day, so this mostly does nothing,
-    # except giving a newly added product its first price within the hour. Times are UTC.
-    - cron: "17 * * * *"
-    - cron: "17 5 * * *" # daily probe
+  # Paused: Geizhals answers GitHub's servers with HTTP 403 (see data/probe.json), and we don't
+  # work around a block. Run by hand from the Actions tab if that ever changes.
   workflow_dispatch: # run by hand from the Actions tab
-  push:
-    branches: [main]
-    paths:
-      - "scripts/**"
-      - ".github/workflows/update-prices.yml"
 
 permissions:
   contents: write
@@ -34,7 +26,6 @@ jobs:
         run: node tests/parse.test.mjs
 
       - name: Probe (one test page, once a day and after code changes)
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.schedule == '17 5 * * *'
         run: node scripts/update-prices.mjs --probe
 
       - name: Geizhals prices
