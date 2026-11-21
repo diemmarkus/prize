@@ -7,6 +7,12 @@ const LIST_KEY = "prize-list";
 export function localStore() {
   let items = [], cb = () => {};
   try { const saved = localStorage.getItem(LIST_KEY); items = saved ? JSON.parse(saved) : samples(); } catch { items = samples(); }
+  // replace the old made-up samples, keep the user's own items
+  if (items.some((i) => i.sample === true)) {
+    const fresh = samples().filter((x) => items.some((i) => i.id === x.id && i.sample === true));
+    items = items.filter((i) => i.sample !== true).concat(fresh);
+    try { localStorage.setItem(LIST_KEY, JSON.stringify(items)); } catch {}
+  }
   const persist = () => { try { localStorage.setItem(LIST_KEY, JSON.stringify(items)); } catch {} cb(items.slice()); };
   return {
     kind: "local",
@@ -32,26 +38,15 @@ export async function fetchStatus() {
 }
 
 /* ---------- samples (first visit) ---------- */
-// Three made-up examples so the graphs have something to show. Marked sample: true.
-function rnd(seed) { return () => ((seed = (seed * 16807) % 2147483647) / 2147483647); }
-function fakeLog({ seed, days, from, to, noise, dip }) {
-  const r = rnd(seed), t = Date.parse(today()), out = [];
-  for (let k = days; k >= 0; k -= 1 + Math.floor(r() * 3)) { // checked every 1–3 days
-    const f = 1 - k / days;
-    let p = from + (to - from) * f + (r() - 0.5) * noise;
-    if (dip && k <= dip) p *= 0.93;
-    out.push({ d: new Date(t - k * 864e5).toISOString().slice(0, 10), p: Math.round(p) - (r() < 0.5 ? 0.01 : 0) });
-  }
-  if (out[out.length - 1].d !== today()) out.push({ d: today(), p: Math.round(to) });
-  return out;
-}
+// Three examples with real prices found on the web on 21 Nov 2026 (one price each, so the graph
+// starts there). Marked sample: true, version 2 (older made-up samples are replaced on load).
 export function samples() {
   return [
-    { id: "s-maerklin", kind: "product", sample: true, name: "Märklin starter set", url: "", target: 249, addedAt: today(),
-      log: fakeLog({ seed: 11, days: 58, from: 309, to: 279, noise: 14, dip: 4 }) },
-    { id: "s-vegas", kind: "trip", sample: true, name: "Flight Vienna → Las Vegas", date: "2027-01-22", url: "", target: 750, addedAt: today(),
-      log: fakeLog({ seed: 23, days: 40, from: 742, to: 868, noise: 40 }) },
-    { id: "s-crete", kind: "trip", sample: true, name: "Car rental Crete (1 week)", date: "2027-06-12", url: "", target: 280, addedAt: today(),
-      log: fakeLog({ seed: 37, days: 26, from: 355, to: 331, noise: 18 }) },
+    { id: "s-maerklin", kind: "product", sample: 2, name: "Märklin 29890 Digital-Startpackung Güterzug mit BR 89.0", url: "", target: 210, addedAt: "2026-11-21",
+      log: [{ d: "2026-11-21", p: 226.72, shop: "Geizhals.de lowest" }] },
+    { id: "s-vegas", kind: "trip", sample: 2, name: "Flight Vienna → Las Vegas, 15–29 Jan", date: "2027-01-15", url: "", target: 600, addedAt: "2026-11-21",
+      log: [{ d: "2026-11-21", p: 651, shop: "SAS, 1+ stops" }] },
+    { id: "s-crete", kind: "trip", sample: 2, name: "Car rental Crete, Heraklion airport (1 week)", date: "2027-06-12", url: "https://www.discovercars.com/de/greece-crete/heraklion", target: 250, addedAt: "2026-11-21",
+      log: [] },
   ];
 }

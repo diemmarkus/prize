@@ -162,7 +162,7 @@ function landingHTML() {
 }
 function appHTML() {
   let h = brandHTML(`${ui.items?.length ? `<button class="icon-btn ${ui.edit ? "on" : ""}" data-act="edit-mode" aria-label="${ui.edit ? "Done" : "Edit list"}" aria-pressed="${ui.edit}">${ico(ui.edit ? "check" : "edit")}</button>` : ""}`);
-  if (ui.items?.some((i) => i.sample)) h += `<div class="demo-bar"><span>The samples have made-up prices. Your list stays in this browser.</span><button data-act="clear-samples">Remove samples</button></div>`;
+  if (ui.items?.some((i) => i.sample)) h += `<div class="demo-bar"><span>Samples with one real price each, found on 21 Nov. Your list stays in this browser.</span><button data-act="clear-samples">Remove samples</button></div>`;
   if (ui.items === null) return h + `<div class="boot">Loading your list…</div>`;
   const items = ui.items;
   if (!items.length) return h + landingHTML() + footHTML();
