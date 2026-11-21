@@ -8,6 +8,8 @@ export function localStore() {
   let items = [], cb = () => {};
   try { const saved = localStorage.getItem(LIST_KEY); items = saved ? JSON.parse(saved) : samples(); } catch { items = samples(); }
   // replace the old made-up samples, keep the user's own items
+  const crete = items.find((i) => i.id === "s-crete" && i.sample === 2 && !(i.log || []).length);
+  if (crete) Object.assign(crete, samples().find((x) => x.id === "s-crete"));
   if (items.some((i) => i.sample === true)) {
     const fresh = samples().filter((x) => items.some((i) => i.id === x.id && i.sample === true));
     items = items.filter((i) => i.sample !== true).concat(fresh);
@@ -46,7 +48,9 @@ export function samples() {
       log: [{ d: "2026-11-21", p: 226.72, shop: "Geizhals.de lowest" }] },
     { id: "s-vegas", kind: "trip", sample: 2, name: "Flight Vienna → Las Vegas, 15–29 Jan", date: "2027-01-15", url: "", target: 600, addedAt: "2026-11-21",
       log: [{ d: "2026-11-21", p: 651, shop: "SAS, 1+ stops" }] },
-    { id: "s-crete", kind: "trip", sample: 2, name: "Car rental Crete, Heraklion airport (1 week)", date: "2027-06-12", url: "https://www.discovercars.com/de/greece-crete/heraklion", target: 250, addedAt: "2026-11-21",
-      log: [] },
+    // billiger-mietwagen.de price barometer: June 2027 at €56.20 (median of the lowest search prices,
+    // read as per day) × 7 days.
+    { id: "s-crete", kind: "trip", sample: 2, name: "Car rental Crete, Heraklion airport (1 week)", date: "2027-06-12", url: "https://www.billiger-mietwagen.de/mietwagen-flughafen-heraklion.html", target: 300, addedAt: "2026-11-21",
+      log: [{ d: "2026-11-21", p: 393.4, shop: "billiger-mietwagen, 7 × €56.20" }] },
   ];
 }
