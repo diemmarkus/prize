@@ -1,7 +1,7 @@
 // prize — watch Geizhals prices, see them over time, buy at the right moment.
 // Design follows Stonks' DESIGN.md (colours, type, rows that unfold, sheets, undo toasts).
-import { onUser, signIn, signOutUser, clearLocalData, isConfigured } from "./firebase.js";
-import { firebaseStore, demoStore, fetchStatus, today } from "./store.js";
+// Prototype: the list lives in this browser (localStorage), no account.
+import { localStore, samples, fetchStatus, today } from "./store.js";
 import { articleId, canonicalUrl } from "../scripts/geizhals.mjs";
 import { imprint, privacy } from "./legal.js";
 
@@ -17,7 +17,6 @@ const ICON = {
   check: '<path d="M5 12.5 10 17 19 7"/>', ext: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
 };
 const ico = (n, c = "i") => `<svg class="${c}" viewBox="0 0 24 24" aria-hidden="true">${ICON[n]}</svg>`;
-const GOOGLE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.4h6.5a5.5 5.5 0 0 1-2.4 3.6v3h3.9c2.3-2.1 3.5-5.2 3.5-8.7z"/><path fill="#34A853" d="M12 24c3.2 0 6-1.1 8-2.9l-3.9-3c-1.1.7-2.5 1.2-4.1 1.2-3.1 0-5.8-2.1-6.7-5H1.3v3.1A12 12 0 0 0 12 24z"/><path fill="#FBBC05" d="M5.3 14.3a7.2 7.2 0 0 1 0-4.6V6.6h-4a12 12 0 0 0 0 10.8l4-3.1z"/><path fill="#EA4335" d="M12 4.8c1.8 0 3.3.6 4.6 1.8l3.4-3.4A12 12 0 0 0 1.3 6.6l4 3.1c.9-2.9 3.6-4.9 6.7-4.9z"/></svg>';
 
 /* ---------- state ---------- */
 const ui = { user: undefined, store: null, items: null, prices: {}, status: null, open: null, edit: false, sheet: null, toast: null, info: false, showAll: false, error: null };
@@ -38,16 +37,25 @@ function relDate(iso) {
   const dt = parseD(iso), same = dt.getFullYear() === parseD(today()).getFullYear();
   return dt.toLocaleDateString("en-GB", same ? { weekday: "short", day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" }).replace(",", "");
 }
+const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return "shop"; } };
 const timeOf = (iso) => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 function blackFriday(y) { const d = new Date(y, 10, 1); return new Date(y, 10, 1 + ((4 - d.getDay() + 7) % 7) + 22); }
 const nameOf = (i) => i.name || ui.prices[i.id]?.name || `Geizhals ${i.id}`;
-const hist = (i) => ui.prices[i.id]?.history || [];
+const isTrip = (i) => i.kind === "trip";
+const shortDate = (iso) => parseD(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: parseD(iso).getFullYear() === parseD(today()).getFullYear() ? undefined : "numeric" });
+// Prices over time: the daily job's (if any) plus the ones you logged; one per day, yours win.
+function hist(i) {
+  const m = new Map();
+  for (const h of ui.prices[i.id]?.history || []) m.set(h.d, h);
+  for (const l of i.log || []) m.set(l.d, { ...l, own: true });
+  return [...m.values()].sort((a, b) => a.d.localeCompare(b.d));
+}
 
 /* ---------- buy signal ---------- */
 function analyze(item) {
   const ps = hist(item), n = ps.length, reasons = [];
   const out = { n, reasons, score: null, cls: "none", label: "Waiting", title: "Waiting for the first price" };
-  if (!n) { out.sub = ui.store?.kind === "demo" ? "" : "The price job checks Geizhals every hour; the first price shows up soon."; return out; }
+  if (!n) { out.label = "No price"; out.title = "No price yet"; out.sub = isTrip(item) ? "Log the price you see when you check." : "Look it up on Geizhals and log the lowest price you see."; return out; }
   const vals = ps.map((p) => p.p), now = vals[n - 1], min = Math.min(...vals), max = Math.max(...vals), avg = vals.reduce((a, b) => a + b, 0) / n;
   Object.assign(out, { now, min, max, avg, first: vals[0], last: ps[n - 1] });
   out.label = "Collecting"; out.title = "Collecting prices";
@@ -63,7 +71,8 @@ function analyze(item) {
     score += Math.max(-20, Math.min(20, d * 100));
     if (Math.abs(d) >= 0.03) reasons.push(`${Math.abs(d * 100).toFixed(0)}% ${d > 0 ? "below" : "above"} the average of ${fmt(avg)}.`);
     const prev = vals.slice(-4, -1), pm = prev.reduce((a, b) => a + b, 0) / prev.length, tr = (now - pm) / pm;
-    if (tr < -0.02) { score -= 8; reasons.push("Still falling; it may drop a bit further."); }
+    if (isTrip(item) && tr > 0.02) { score = Math.max(score + 10, 50); out.rising = true; reasons.push("Going up. Trips rarely get cheaper once that starts."); }
+    else if (!isTrip(item) && tr < -0.02) { score -= 8; reasons.push("Still falling; it may drop a bit further."); }
     else if (tr > 0.02) reasons.push("Went up in the last few days.");
   }
   if (item.target != null && item.target !== "" && !isNaN(item.target)) {
@@ -72,19 +81,28 @@ function analyze(item) {
     else { score -= Math.min(15, ((now - item.target) / item.target) * 50); reasons.push(`${fmt(now - item.target)} above your target of ${fmt(+item.target)}.`); }
   }
   const t = parseD(today());
+  if (isTrip(item) && item.date) {
+    const dd = Math.round((parseD(item.date) - t) / DAY);
+    if (dd < 0) reasons.push("The date has passed.");
+    else if (dd <= 21) { score += 15; w++; reasons.push(`${dd} day${dd === 1 ? "" : "s"} to go; prices usually climb close to the date.`); }
+    else if (dd <= 60) { score += 7; w++; reasons.push(`${dd} days to go, the window where prices tend to rise.`); }
+    else reasons.push(`${dd} days to go, so there's time to watch.`);
+  }
   let bf = blackFriday(t.getFullYear());
   if (bf < t - 4 * DAY) bf = blackFriday(t.getFullYear() + 1);
   const days = Math.round((bf - t) / DAY);
-  if (days > 0 && days <= 21) { score -= 15; w++; reasons.push(`Black Friday is in ${days} day${days === 1 ? "" : "s"} (${bf.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).replace(",", "")}); many things drop then.`); }
+  if (isTrip(item)) {}
+  else if (days > 0 && days <= 21) { score -= 15; w++; reasons.push(`Black Friday is in ${days} day${days === 1 ? "" : "s"} (${bf.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).replace(",", "")}); many things drop then.`); }
   else if (days >= -3 && days <= 0) { score += 8; reasons.push("It's Black Friday weekend, usually one of the best times to buy."); }
   if (n < 3 && !w) { out.sub = `${3 - n} more day${3 - n === 1 ? "" : "s"} of prices, or a target price, for a verdict.`; return out; }
   if (n < 3) reasons.push(`Only ${n} day${n === 1 ? "" : "s"} of prices so far; the verdict gets better every day.`);
+  if (out.rising) score = Math.max(score, 50); // a rising trip: buying soon is at least fair
   score = Math.max(0, Math.min(100, score));
   out.score = score;
   if (score >= 68) Object.assign(out, { cls: "good", label: "Buy now", title: "Good time to buy" });
   else if (score >= 45) Object.assign(out, { cls: "mid", label: "Fair", title: "Fair price, no rush" });
   else Object.assign(out, { cls: "bad", label: "Wait", title: "Better wait" });
-  out.sub = reasons[0];
+  out.sub = out.rising && out.cls !== "good" ? "Going up. If you're sure, waiting may cost more." : reasons[0];
   return out;
 }
 
@@ -125,9 +143,7 @@ function chart(item, a) {
 function render() {
   const keep = captureInputs();
   let h = "";
-  if (ui.user === undefined && !ui.store) h = `<div class="boot">prize</div>`;
-  else if (!ui.store) h = landingHTML();
-  else h = appHTML();
+  h = ui.store ? appHTML() : `<div class="boot">prize</div>`;
   if (ui.sheet) h += sheetHTML();
   if (ui.toast) h += `<div class="toast" role="status"><span>${esc(ui.toast.msg)}</span>${ui.toast.undo ? `<button class="toast__act" data-act="undo">Undo</button>` : ""}</div>`;
   $("#root").innerHTML = h;
@@ -138,39 +154,33 @@ function brandHTML(right = "") {
 }
 function footHTML() { return `<nav class="foot"><button data-act="legal" data-which="imprint">Imprint</button><button data-act="legal" data-which="privacy">Privacy</button><a href="https://github.com/diemmarkus/prize" target="_blank" rel="noopener">GitHub</a></nav>`; }
 function landingHTML() {
-  return brandHTML() + `<section class="hero"><p class="eyebrow">Geizhals prices, every day</p>
+  return `<section class="hero"><p class="eyebrow">Geizhals prices over time</p>
     <h1>Prices go <em>down.</em><br>Sometimes <em class="down">up.</em></h1>
-    <p>Paste a Geizhals link. prize checks the lowest price every day, draws it over time and tells you when it's a good moment to buy.</p>
-    <div class="actions">${isConfigured ? `<button class="btn btn--primary btn--google" data-act="signin">${GOOGLE}Sign in with Google</button>` : ""}<button class="btn" data-act="demo">Try the demo</button></div>
-    ${ui.error ? `<p class="hint bad">${esc(ui.error)}</p>` : ""}</section>
-    <ol class="steps"><li>Find the product on Geizhals and copy the link.</li><li>Add it here, optionally with the price you'd pay.</li><li>Every day the lowest price is saved, and the verdict says Buy now, Fair or Wait.</li></ol>` + footHTML();
+    <p>Add something you want to buy, from Geizhals, a flight or a rental car, and log its price when you check. prize draws it over time and tells you when it's a good moment to buy.</p>
+    <div class="actions"><button class="btn btn--primary" data-act="add">${ico("plus")}Add a product</button><button class="btn" data-act="samples">Add 3 samples</button></div></section>
+    <ol class="steps"><li>Add a product or trip, with a link to where you'd buy it.</li><li>Add it here, optionally with the price you'd pay.</li><li>Log the price whenever you look. The verdict says Buy now, Fair or Wait.</li></ol>`;
 }
 function appHTML() {
-  const u = ui.user, demo = ui.store.kind === "demo";
-  const avatar = demo ? "" : `<button class="avatar" data-act="account" aria-label="Account">${u?.photoURL ? `<img src="${esc(u.photoURL)}" alt="" referrerpolicy="no-referrer">` : esc((u?.displayName || "?")[0])}</button>`;
-  let h = brandHTML(`${ui.items?.length ? `<button class="icon-btn ${ui.edit ? "on" : ""}" data-act="edit-mode" aria-label="${ui.edit ? "Done" : "Edit list"}" aria-pressed="${ui.edit}">${ico(ui.edit ? "check" : "edit")}</button>` : ""}${avatar}`);
-  if (demo) h += `<div class="demo-bar"><span>Demo with made-up prices, kept in this browser.</span><button data-act="leave-demo">Leave demo</button></div>`;
+  let h = brandHTML(`${ui.items?.length ? `<button class="icon-btn ${ui.edit ? "on" : ""}" data-act="edit-mode" aria-label="${ui.edit ? "Done" : "Edit list"}" aria-pressed="${ui.edit}">${ico(ui.edit ? "check" : "edit")}</button>` : ""}`);
+  if (ui.items?.some((i) => i.sample)) h += `<div class="demo-bar"><span>The samples have made-up prices. Your list stays in this browser.</span><button data-act="clear-samples">Remove samples</button></div>`;
   if (ui.items === null) return h + `<div class="boot">Loading your list…</div>`;
   const items = ui.items;
-  if (!items.length) {
-    return h + `<div class="card"><div class="empty"><h2>Nothing watched yet</h2><p>Add a Geizhals link and prize collects its lowest price every day.</p>
-      <button class="btn btn--primary" data-act="add">${ico("plus")}Add a product</button></div></div>` + footHTML() + fab();
-  }
+  if (!items.length) return h + landingHTML() + footHTML();
   const rows = items.map((i) => ({ i, a: analyze(i) }));
   const rank = { good: 0, mid: 1, bad: 2, none: 3 };
   rows.sort((x, y) => rank[x.a.cls] - rank[y.a.cls] || (y.a.score ?? 0) - (x.a.score ?? 0) || nameOf(x.i).localeCompare(nameOf(y.i)));
   const good = rows.filter((r) => r.a.cls === "good").length;
-  h += `<div class="page-head"><h1 class="page-title">Watchlist</h1><div class="page-meta">${items.length} product${items.length === 1 ? "" : "s"}${good ? `<br><b>${good} to buy now</b>` : ""}</div></div>`;
+  h += `<div class="page-head"><h1 class="page-title">Watchlist</h1><div class="page-meta">${items.length} item${items.length === 1 ? "" : "s"}${good ? `<br><b>${good} to buy now</b>` : ""}</div></div>`;
   h += `<div class="card ${ui.edit ? "editing" : ""}"><ul class="rows">${rows.map(({ i, a }) => rowHTML(i, a)).join("")}</ul></div>`;
   const st = ui.status;
-  if (demo) h += `<div class="stamp"><i></i>Demo prices</div>`;
-  else if (st?.ran) h += `<div class="stamp"><i></i>Geizhals prices · checked ${esc(relDate(new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Vienna" }).format(new Date(st.ran))))} ${esc(timeOf(st.ran))}</div>`;
+  if (st?.ran && st.updated) h += `<div class="stamp"><i></i>Geizhals prices · checked ${esc(relDate(new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Vienna" }).format(new Date(st.ran))))} ${esc(timeOf(st.ran))}</div>`;
   return h + footHTML() + fab();
 }
 const fab = () => `<button class="fab" data-act="add" aria-label="Add a product">${ico("plus")}</button>`;
 function rowHTML(i, a) {
   const open = ui.open === i.id, err = ui.prices[i.id]?.error;
-  const sub = a.n ? `${esc(relDate(a.last.d))}${a.last.n ? ` · ${a.last.n} offers` : ""}` : err ? `<span class="warn">Couldn't read the price yet</span>` : "First price coming";
+  const tag = isTrip(i) ? `<span class="row__tag">${i.date ? esc(shortDate(i.date)) : "Trip"}</span>` : "";
+  const sub = tag + (a.n ? `${esc(relDate(a.last.d))}${a.last.shop ? ` · ${esc(a.last.shop)}` : a.last.n ? ` · ${a.last.n} offers` : ""}` : "No price yet");
   return `<li class="${open ? "is-open" : ""}" data-li="${i.id}"><div class="rw"><div class="swipe-bg">Remove</div>
     <div class="row" data-row="${i.id}" tabindex="0" role="button" aria-expanded="${open}">
       ${ui.edit ? `<button class="del" data-remove="${i.id}" aria-label="Remove ${esc(nameOf(i))}">${ico("minus")}</button>` : ""}
@@ -189,17 +199,22 @@ function openHTML(i, a) {
   h += `<div class="verdict"><div class="verdict__txt"><h3 class="${a.cls}">${esc(a.title)}</h3>${a.sub ? `<p>${esc(a.sub)}</p>` : ""}</div>
     ${a.reasons.length > 1 ? `<button class="info-btn" data-act="info" aria-expanded="${ui.info}" aria-label="Why">i</button>` : ""}</div>`;
   if (ui.info && a.reasons.length > 1) h += `<div class="note"><ul>${a.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></div>`;
-  if (err) h += `<p class="waiting warn">The last check failed (${esc(err)}). It's tried again tomorrow.</p>`;
   h += chart(i, a);
   if (a.n > 1) h += `<div class="stats"><div class="stat"><small>Lowest</small><b>${esc(fmt(a.min))}</b></div><div class="stat"><small>Average</small><b>${esc(fmt(a.avg))}</b></div><div class="stat"><small>${i.target ? "Target" : "Highest"}</small><b>${esc(fmt(i.target ? +i.target : a.max))}</b></div></div>`;
-  h += `<div class="actions"><a class="btn btn--primary btn--grow" href="${esc(i.url)}" target="_blank" rel="noopener">${ico("ext")}Buy on Geizhals</a>
+  const buy = i.url ? { href: i.url, label: articleId(i.url) ? "Buy on Geizhals" : `Buy at ${host(i.url)}` }
+    : !isTrip(i) ? { href: `https://geizhals.at/?fs=${encodeURIComponent(nameOf(i))}`, label: "Find on Geizhals" } : null;
+  h += `<div class="actions">${buy ? `<a class="btn btn--primary btn--grow" href="${esc(buy.href)}" target="_blank" rel="noopener">${ico("ext")}${esc(buy.label)}</a>` : ""}
     <button class="btn" data-act="edit-item">${ico("edit")}Edit</button></div>`;
+  h += `<form class="log" id="logForm"><span>Today</span><input class="input inline" id="logPrice" name="price" type="number" step="0.01" min="0" inputmode="decimal" placeholder="€" required aria-label="Price today">
+    <span>at</span><input class="input inline wide" id="logShop" name="shop" placeholder="shop" aria-label="Shop" autocomplete="off">
+    <button class="btn btn--primary" type="submit">Log</button></form>`;
   if (ps.length) {
     const show = ui.showAll ? ps : ps.slice(0, 5);
     h += `<ul class="history">${show.map((p, k) => {
       const prev = ps[k + 1], d = prev ? p.p - prev.p : 0;
-      return `<li><div><div class="when">${esc(relDate(p.d))}</div>${p.n ? `<div class="shop">${p.n} offers</div>` : ""}</div>
-        <div class="p">${esc(fmt(p.p))}${d ? `<span class="chg ${d > 0 ? "up" : "down"}">${esc(fmtS(d))}</span>` : ""}</div><span></span></li>`;
+      return `<li><div><div class="when">${esc(relDate(p.d))}</div>${p.shop ? `<div class="shop">${esc(p.shop)}</div>` : p.n ? `<div class="shop">${p.n} offers</div>` : ""}</div>
+        <div class="p">${esc(fmt(p.p))}${d ? `<span class="chg ${d > 0 ? "up" : "down"}">${esc(fmtS(d))}</span>` : ""}</div>
+        ${p.own ? `<button class="x-sm" data-delp="${p.d}" aria-label="Delete this price">${ico("x")}</button>` : "<span></span>"}</li>`;
     }).join("")}</ul>`;
     if (ps.length > 5) h += `<button class="fold" data-act="more">${ui.showAll ? "Show less ▴" : `${ps.length - 5} more days ▾`}</button>`;
   }
@@ -211,22 +226,15 @@ function sheetHTML() {
     const doc = s.which === "imprint" ? imprint() : privacy();
     return sheetWrap(doc.title, `<div class="legal">${doc.sections.map((x) => `<h3>${esc(x.h)}</h3>${(x.p || []).map((p) => `<p>${esc(p)}</p>`).join("")}${x.list ? `<ul>${x.list.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}`).join("")}</div>`);
   }
-  if (s.type === "account") {
-    const u = ui.user;
-    return sheetWrap("You", `<div class="acct"><div class="who"><span class="avatar">${u?.photoURL ? `<img src="${esc(u.photoURL)}" alt="" referrerpolicy="no-referrer">` : esc((u?.displayName || "?")[0])}</span><div><div>${esc(u?.displayName || "")}</div><div class="hint">${esc(u?.email || "")}</div></div></div>
-      <button class="btn" data-act="signout">Sign out</button>${footHTML()}</div>`);
-  }
-  const it = s.item, isNew = !s.editing;
-  const id = articleId(it.url || "");
-  const hint = !it.url ? "Paste the link of the product page on geizhals.at" : id ? `✓ Geizhals article ${id}` : "That isn't a Geizhals product link";
+  const it = s.item, isNew = !s.editing, trip = isTrip(it);
   return `<div class="sheet" role="dialog" aria-modal="true" aria-label="${isNew ? "Add" : "Edit"}"><div class="sheet__backdrop" data-act="close"></div><div class="sheet__panel"><div class="sheet__grip"></div>
     <form id="itemForm" class="form">
       <div class="sheet__head"><h2 class="sheet__title">${isNew ? "Add" : "Edit"}</h2>
         <div class="btns"><button class="btn btn--primary" type="submit">${isNew ? "Add" : "Save"}</button><button type="button" class="icon-btn" data-act="close" aria-label="Close">${ico("x")}</button></div></div>
-      ${isNew ? `<label class="field"><span class="field__label">Geizhals link</span><input class="input input--mono" id="fUrl" name="url" type="url" inputmode="url" required value="${esc(it.url || "")}" placeholder="https://geizhals.at/…-a1234567.html" autocomplete="off"><span class="hint ${it.url ? (id ? "ok" : "bad") : ""}" id="urlHint">${esc(hint)}</span></label>`
-        : `<p class="hint">${esc(it.url)}</p>`}
-      <label class="field"><span class="field__label">Name <em>· optional, otherwise Geizhals' name</em></span><input class="input" id="fName" name="name" value="${esc(it.name || "")}" placeholder="${esc(ui.prices[id]?.name || "e.g. Märklin starter set")}" autocomplete="off"></label>
-      <div class="sentence">I'd pay <input class="input inline" id="fTarget" name="target" type="number" step="0.01" min="0" inputmode="decimal" value="${esc(it.target ?? "")}" placeholder="€" aria-label="Target price"> <span class="hint">optional</span></div>
+      <div class="switch" role="radiogroup">${[["product", "Product"], ["trip", "Trip"]].map(([k, l]) => `<button type="button" role="radio" aria-checked="${(it.kind || "product") === k}" data-kind="${k}">${l}</button>`).join("")}</div>
+      <label class="field"><span class="field__label">What</span><input class="input" id="fName" name="name" value="${esc(it.name || "")}" placeholder="${trip ? "Flight Vienna → Las Vegas" : "Märklin starter set"}" autocomplete="off"></label>
+      <div class="sentence">${trip ? `On <input class="input inline wide" id="fDate" name="date" type="date" value="${esc(it.date || "")}" aria-label="Travel date">, ` : ""}I'd pay <input class="input inline" id="fTarget" name="target" type="number" step="0.01" min="0" inputmode="decimal" value="${esc(it.target ?? "")}" placeholder="€" aria-label="Target price"></div>
+      <label class="field"><span class="field__label">Link <em>· ${trip ? "booking page, optional" : "Geizhals or shop page, optional"}</em></span><input class="input input--mono" id="fUrl" name="url" type="url" inputmode="url" value="${esc(it.url || "")}" placeholder="https://" autocomplete="off"><span class="hint" id="urlHint"></span></label>
       ${isNew ? "" : `<button type="button" class="btn btn--danger" data-remove="${it.id}">Remove from watchlist</button>`}
     </form></div></div>`;
 }
@@ -241,7 +249,7 @@ function restoreInputs(k) {
 
 /* ---------- data ---------- */
 async function loadPrices(items) {
-  await Promise.all(items.filter((i) => !(i.id in ui.prices)).map(async (i) => { ui.prices[i.id] = (await ui.store.prices(i.id)) || null; }));
+  await Promise.all(items.filter((i) => /^a\d+$/.test(i.id) && !(i.id in ui.prices)).map(async (i) => { ui.prices[i.id] = (await ui.store.prices(i.id)) || null; }));
   render();
 }
 async function useStore(store) {
@@ -254,7 +262,7 @@ async function useStore(store) {
     ui.items = items; render(); loadPrices(items);
     store.touch(items).catch(() => {});
   });
-  if (store.kind !== "demo") fetchStatus().then((s) => { ui.status = s; render(); });
+  fetchStatus().then((s) => { ui.status = s; render(); });
 }
 
 /* ---------- actions ---------- */
@@ -280,21 +288,27 @@ function openAdd() { ui.sheet = { type: "item", item: {} }; render(); setTimeout
 let swallowClick = false;
 document.addEventListener("click", async (e) => {
   if (swallowClick) { swallowClick = false; e.preventDefault(); return; }
-  const t = e.target.closest("[data-act],[data-row],[data-remove]");
+  const t = e.target.closest("[data-act],[data-row],[data-remove],[data-delp],[data-kind]");
   if (!t) return;
   if (t.dataset.remove) { e.stopPropagation(); removeItem(t.dataset.remove); return; }
+  if (t.dataset.kind) {
+    const f = $("#itemForm"), d = Object.fromEntries(new FormData(f));
+    Object.assign(ui.sheet.item, { name: d.name, target: d.target, url: d.url, date: d.date ?? ui.sheet.item.date, kind: t.dataset.kind });
+    render(); return;
+  }
   if (t.dataset.row) { if (!ui.edit) setOpen(t.dataset.row); return; }
+  if (t.dataset.delp) {
+    const it = ui.items.find((i) => i.id === ui.open), before = it.log || [];
+    const upd = { ...it, log: before.filter((l) => l.d !== t.dataset.delp) };
+    await ui.store.save(upd);
+    toast("Price deleted", () => ui.store.save({ ...upd, log: before }));
+    return;
+  }
   switch (t.dataset.act) {
-    case "signin":
-      ui.error = null;
-      try { await signIn(); } catch (err) { if (err?.code !== "auth/popup-closed-by-user" && err?.code !== "auth/cancelled-popup-request") { ui.error = "Sign-in didn't work. Please try again."; render(); } }
-      break;
-    case "signout": ui.sheet = null; await signOutUser(); await clearLocalData(); break;
-    case "demo": useStore(demoStore()); break;
-    case "leave-demo": ui.store.reset?.(); if (unsub) unsub(); ui.store = null; ui.items = null; history.replaceState(null, "", location.pathname); if (ui.user) useStore(firebaseStore(ui.user.uid)); else render(); break;
+    case "samples": for (const x of samples()) if (!ui.items.some((i) => i.id === x.id)) await ui.store.save(x); break;
+    case "clear-samples": { const gone = ui.items.filter((i) => i.sample); for (const x of gone) await ui.store.remove(x.id); ui.open = null; toast("Samples removed", async () => { for (const x of gone) await ui.store.save(x); }); break; }
     case "add": openAdd(); break;
     case "edit-item": { const it = ui.items.find((i) => i.id === ui.open); ui.sheet = { type: "item", editing: true, item: { ...it } }; render(); break; }
-    case "account": ui.sheet = { type: "account" }; render(); break;
     case "legal": ui.sheet = { type: "legal", which: t.dataset.which }; render(); break;
     case "close": ui.sheet = null; render(); break;
     case "edit-mode": ui.edit = !ui.edit; if (ui.edit) ui.open = null; render(); break;
@@ -310,28 +324,38 @@ document.addEventListener("keydown", (e) => {
 });
 document.addEventListener("input", (e) => {
   if (e.target.id !== "fUrl") return;
-  const v = e.target.value.trim(), id = articleId(v), h = $("#urlHint");
-  h.className = "hint " + (v ? (id ? "ok" : "bad") : "");
-  h.textContent = !v ? "Paste the link of the product page on geizhals.at" : id ? `✓ Geizhals article ${id}` : "That isn't a Geizhals product link";
+  const v = e.target.value.trim(), h = $("#urlHint"), id = articleId(v);
+  h.className = "hint " + (id ? "ok" : "");
+  h.textContent = id ? `✓ Geizhals article ${id}` : "";
 });
 document.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (e.target.id === "logForm") {
+    const d = Object.fromEntries(new FormData(e.target)), p = parseFloat(d.price);
+    if (isNaN(p)) return;
+    const it = ui.items.find((i) => i.id === ui.open), t = today();
+    ["logPrice", "logShop"].forEach((id) => { const x = document.getElementById(id); if (x) x.value = ""; });
+    await ui.store.save({ ...it, log: (it.log || []).filter((l) => l.d !== t).concat({ d: t, p: Math.round(p * 100) / 100, ...(d.shop?.trim() ? { shop: d.shop.trim() } : {}) }) });
+    return;
+  }
   if (e.target.id !== "itemForm") return;
   const d = Object.fromEntries(new FormData(e.target)), s = ui.sheet;
   const target = d.target === "" || d.target == null ? null : parseFloat(d.target);
+  const raw = (d.url || "").trim(), gid = articleId(raw), url = gid ? canonicalUrl(raw) : raw;
+  const name = (d.name || "").trim(), kind = s.item.kind || "product";
+  if (!name && !gid) { $("#fName")?.focus(); return; }
   let item;
-  if (s.editing) item = { ...s.item, name: (d.name || "").trim(), target };
+  if (s.editing) item = { ...s.item, kind, name, target, url, ...(kind === "trip" ? { date: d.date || "" } : { date: undefined }) };
   else {
-    const id = articleId(d.url || ""), url = canonicalUrl(d.url || "");
-    if (!id) { $("#fUrl")?.focus(); return; }
+    const id = gid || "x" + Math.random().toString(36).slice(2, 9);
     if (ui.items.some((i) => i.id === id)) { ui.sheet = null; setOpen(id); toast("Already on your list"); return; }
-    item = { id, url, name: (d.name || "").trim(), target, addedAt: today() };
+    item = { id, kind, url, name, target, addedAt: today(), log: [], ...(kind === "trip" ? { date: d.date || "" } : {}) };
   }
   ui.sheet = null; ui.open = item.id; ui.edit = false; ui.info = false;
   try { history.replaceState(null, "", "#p-" + item.id); } catch {}
   ui.items = ui.items.filter((i) => i.id !== item.id).concat(item);
   render();
-  try { await ui.store.save(item); loadPrices([item]); }
+  try { await ui.store.save(item); if (gid) loadPrices([item]); }
   catch (err) { console.warn(err); toast("Couldn't save. Check your connection and try again."); }
 });
 
@@ -367,11 +391,4 @@ document.addEventListener("pointercancel", endSwipe);
 window.addEventListener("resize", () => { if (ui.open) render(); });
 
 /* ---------- start ---------- */
-if (/[?&]demo\b/.test(location.search)) useStore(demoStore());
-else render();
-onUser((user) => {
-  ui.user = user;
-  if (ui.store?.kind === "demo") { render(); return; }
-  if (user) useStore(firebaseStore(user.uid));
-  else { if (unsub) { try { unsub(); } catch {} unsub = null; } ui.store = null; ui.items = null; render(); }
-}).catch((e) => { console.warn(e); ui.user = null; render(); });
+useStore(localStore());

@@ -1,41 +1,19 @@
-// Where your watch list lives.
-//  - Signed in: Firestore users/{uid}/prize/{id}  (private, covered by the users/{uid}/** rule)
-//    plus the public `watched/{id}` list the daily GitHub Action reads (link and product name only).
-//  - Demo: this browser's localStorage, with made-up price histories.
-import { getDb } from "./firebase.js";
+// Where your watch list lives (prototype): this browser's localStorage, key "prize-list".
+// Prices you log are kept with each item; prices from the (paused) daily job would come from data/prices/<id>.json.
 
 export const today = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Vienna" }).format(new Date());
 
-export function firebaseStore(uid) {
-  let fs;
-  const ready = getDb().then((x) => (fs = x));
-  const col = () => fs.collection(fs.db, "users", uid, "prize");
+const LIST_KEY = "prize-list";
+export function localStore() {
+  let items = [], cb = () => {};
+  try { const saved = localStorage.getItem(LIST_KEY); items = saved ? JSON.parse(saved) : samples(); } catch { items = samples(); }
+  const persist = () => { try { localStorage.setItem(LIST_KEY, JSON.stringify(items)); } catch {} cb(items.slice()); };
   return {
-    kind: "firebase",
-    async subscribe(cb) {
-      await ready;
-      return fs.onSnapshot(col(), (snap) => cb(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), (e) => { console.warn(e); cb(null, e); });
-    },
-    async save(item) {
-      await ready;
-      const { id, ...data } = item;
-      await Promise.all([
-        fs.setDoc(fs.doc(col(), id), data),
-        fs.setDoc(fs.doc(fs.db, "watched", id), { url: item.url, name: item.name || "", lastSeen: today() }, { merge: true }),
-      ]);
-    },
-    async remove(id) { await ready; await fs.deleteDoc(fs.doc(col(), id)); },
-    // Tells the daily job these products are still wanted (it skips ones nobody opened for 30 days).
-    async touch(items) {
-      await ready;
-      const key = "prize-seen", t = today();
-      let seen = {};
-      try { seen = JSON.parse(localStorage.getItem(key) || "{}"); } catch {}
-      const due = items.filter((i) => seen[i.id] !== t);
-      await Promise.all(due.map((i) => fs.setDoc(fs.doc(fs.db, "watched", i.id), { url: i.url, name: i.name || "", lastSeen: t }, { merge: true }).catch(() => {})));
-      due.forEach((i) => (seen[i.id] = t));
-      try { localStorage.setItem(key, JSON.stringify(seen)); } catch {}
-    },
+    kind: "local",
+    async subscribe(f) { cb = f; f(items.slice()); return () => {}; },
+    async save(item) { const i = items.findIndex((x) => x.id === item.id); if (i >= 0) items[i] = item; else items.push(item); persist(); },
+    async remove(id) { items = items.filter((i) => i.id !== id); persist(); },
+    async touch() {},
     prices: (id) => fetchPrices(id),
   };
 }
@@ -53,41 +31,27 @@ export async function fetchStatus() {
   } catch { return null; }
 }
 
-/* ---------- demo ---------- */
-const DEMO_KEY = "prize-demo";
-const DEMO = [
-  { id: "a3587143", url: "https://geizhals.at/apple-airpods-pro-3-generation-mfhp4zm-a-a3587143.html", name: "Apple AirPods Pro 3", target: 199, base: 249, drift: -0.0025, noise: 9 },
-  { id: "a1000001", url: "https://geizhals.at/a1000001.html", name: "Espresso machine", target: 450, base: 529, drift: -0.004, noise: 14 },
-  { id: "a1000002", url: "https://geizhals.at/a1000002.html", name: "Märklin starter set", target: null, base: 189, drift: 0.0012, noise: 6 },
-];
+/* ---------- samples (first visit) ---------- */
+// Three made-up examples so the graphs have something to show. Marked sample: true.
 function rnd(seed) { return () => ((seed = (seed * 16807) % 2147483647) / 2147483647); }
-function fakeHistory(d) {
-  const r = rnd(parseInt(d.id.slice(1), 10) % 100000 + 7), out = [];
-  const t = Date.parse(today());
-  let p = d.base;
-  for (let k = 60; k >= 0; k--) {
-    p = Math.max(d.base * 0.6, p * (1 + d.drift) + (r() - 0.5) * d.noise * 0.6);
-    if (k === 6) p *= 0.94; // a small Black Friday-ish drop
-    out.push({ d: new Date(t - k * 864e5).toISOString().slice(0, 10), p: Math.round(p) - 0.01 * (r() < 0.5 ? 1 : 10), n: 20 + Math.round(r() * 30) });
+function fakeLog({ seed, days, from, to, noise, dip }) {
+  const r = rnd(seed), t = Date.parse(today()), out = [];
+  for (let k = days; k >= 0; k -= 1 + Math.floor(r() * 3)) { // checked every 1–3 days
+    const f = 1 - k / days;
+    let p = from + (to - from) * f + (r() - 0.5) * noise;
+    if (dip && k <= dip) p *= 0.93;
+    out.push({ d: new Date(t - k * 864e5).toISOString().slice(0, 10), p: Math.round(p) - (r() < 0.5 ? 0.01 : 0) });
   }
+  if (out[out.length - 1].d !== today()) out.push({ d: today(), p: Math.round(to) });
   return out;
 }
-export function demoStore() {
-  let items, cb = () => {};
-  try { items = JSON.parse(localStorage.getItem(DEMO_KEY) || "null"); } catch {}
-  items ||= DEMO.map(({ id, url, name, target }) => ({ id, url, name, target, addedAt: today() }));
-  const persist = () => { try { localStorage.setItem(DEMO_KEY, JSON.stringify(items)); } catch {} cb(items.slice()); };
-  return {
-    kind: "demo",
-    async subscribe(f) { cb = f; f(items.slice()); return () => {}; },
-    async save(item) { items = items.filter((i) => i.id !== item.id).concat(item); persist(); },
-    async remove(id) { items = items.filter((i) => i.id !== id); persist(); },
-    async touch() {},
-    async prices(id) {
-      const d = DEMO.find((x) => x.id === id) || { id, base: 80 + (parseInt(id.slice(1), 10) % 400), drift: -0.001, noise: 5 };
-      const it = items.find((i) => i.id === id);
-      return { id, url: it?.url, name: d.name || null, currency: "EUR", history: fakeHistory(d), checked: new Date().toISOString() };
-    },
-    reset() { try { localStorage.removeItem(DEMO_KEY); } catch {} },
-  };
+export function samples() {
+  return [
+    { id: "s-maerklin", kind: "product", sample: true, name: "Märklin starter set", url: "", target: 249, addedAt: today(),
+      log: fakeLog({ seed: 11, days: 58, from: 309, to: 279, noise: 14, dip: 4 }) },
+    { id: "s-vegas", kind: "trip", sample: true, name: "Flight Vienna → Las Vegas", date: "2027-01-22", url: "", target: 750, addedAt: today(),
+      log: fakeLog({ seed: 23, days: 40, from: 742, to: 868, noise: 40 }) },
+    { id: "s-crete", kind: "trip", sample: true, name: "Car rental Crete (1 week)", date: "2027-06-12", url: "", target: 280, addedAt: today(),
+      log: fakeLog({ seed: 37, days: 26, from: 355, to: 331, noise: 18 }) },
+  ];
 }
