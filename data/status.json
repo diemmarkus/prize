@@ -1,0 +1,14 @@
+{
+ "ran": "2026-11-22T12:39:10.953Z",
+ "updated": 0,
+ "failed": [
+  {
+   "id": "k-maerklin-29890",
+   "error": "KEEPA_API_KEY is not set"
+  },
+  {
+   "id": "tp-VIE-LAS-2027-01-15",
+   "error": "TRAVELPAYOUTS_TOKEN is not set"
+  }
+ ]
+}
